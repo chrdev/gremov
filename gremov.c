@@ -1,163 +1,144 @@
-#define UNICODE
 
-#include <sdkddkver.h>
 #include <Windows.h>
 #include <cfgmgr32.h>
 #include <SetupAPI.h>
+#include <shlwapi.h> // wvnsprintfW()
 
 #include <stdbool.h>
+#include <stdarg.h>
 
 
-// If t is NUL-terminated, len can be -1
-static void
-errout(const wchar_t* t, int len) {
-	if (!t) return;
-	if (len < 0) len = lstrlenW(t);
-	HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-	DWORD dum;
-	if (GetConsoleMode(h, &dum)) {
-		WriteConsole(h, t, (DWORD)len, &dum, NULL);
-	}
-	else {
-		WriteFile(h, t, (DWORD)(sizeof(*t) * len), &dum, NULL);
-	}
-}
+#define MY_VER "1.0.1"
 
-static inline wchar_t*
-getOutputPath(void) {
-	int argc;
+
+#define stdout GetStdHandle(STD_OUTPUT_HANDLE)
+#define stderr GetStdHandle(STD_ERROR_HANDLE)
+
+
+static const wchar_t kHelp_[] =
+	L"\r\nRedirect to save the .reg file.\r\n"
+	L"E.g., gremov.exe > removal_overrides.reg\r\n"
+	L"See README to learn how to schedule.\r\n";
+
+static const wchar_t kEject_[] = 
+	L"\r\nNo removable device.\r\n"
+	L"If your device is showing in the eject menu, eject but don't unplug it. Then re-run me.\r\n";
+
+static const wchar_t kSchd_[] =
+	L"\r\n.reg file saved.\r\n"
+	L"Scheduled task example:\r\n"
+	L"Command: \"regedit.exe /s removal_overrides.reg\"\r\n"
+	L"Run At:  system startup\r\n"
+	L"User:    SYSTEM\r\n";
+
+static __forceinline bool
+isCmdOk(void) {
+	int argc = 0;
 	wchar_t** argv = CommandLineToArgvW(GetCommandLine(), &argc);
-	if (argc != 2) goto err;
-
-	switch (argv[1][0]) {
-	case L'/':
-	case L'-':
-		goto err;
-	}
-	// We don't care argv never LocalFree()ed, let it die with the process.
-	return argv[1];
-
-err:;
+	if (!argv) return false;
 	LocalFree(argv);
-	return NULL;
+	return argc <= 1;
 }
 
-static void
-help(void) {
-	static const wchar_t t[] =
-		L"E.g., gremov.exe removal_overrides.reg\r\n"
-		L"See README for usage.\r\n";
-	errout(t, ARRAYSIZE(t) - 1);
-}
+static int __cdecl
+hprintf(HANDLE h, const wchar_t* fmt, ...) {
+	wchar_t buffer[1024];
+	va_list args;
+	va_start(args, fmt);
+	int cch = wvnsprintfW(buffer, ARRAYSIZE(buffer), fmt, args);
+	va_end(args);
+	if (cch <= 0) return cch;
 
-static HANDLE
-createRegFile(const wchar_t* path, const wchar_t** errmsg) {
-	static const wchar_t* kErrExists = L"File exists.\r\n";
-	static const wchar_t* kErrWriting = L"Can\'t write file.\r\n";
-
-	static const wchar_t kHeader[41] = L"\xFEFFWindows Registry Editor Version 5.00\r\n\r\n";
-
-	HANDLE h = CreateFile(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (h == INVALID_HANDLE_VALUE) {
-		if (errmsg) *errmsg = kErrExists;
-		return INVALID_HANDLE_VALUE;
+	// On Windows 10 and later, WriteFile() writes console right.
+	// On Windows Xp and earlier, WriteFile() writes spaced letters.
+	// So we try WriteConsoleW() first.
+	DWORD sz = 0;
+	if (!WriteConsoleW(h, buffer, cch, &sz, NULL)) {
+		WriteFile(h, buffer, sizeof(wchar_t) * cch, &sz, NULL);
 	}
+	return cch;
+}
 
-	DWORD cb;
-	if (!WriteFile(h, kHeader, sizeof(kHeader), &cb, NULL)) {
-		CloseHandle(h);
-		DeleteFile(path);
-		if (errmsg) *errmsg = kErrWriting;
-		return INVALID_HANDLE_VALUE;
+static __forceinline bool
+isatty(void) {
+	return GetFileType(stdout) == FILE_TYPE_CHAR;
+}
+
+static __forceinline void
+writeRegHeader(void) {
+	static const wchar_t kBom = L'\xFEFF';
+	static const wchar_t kHeader[41] = L"Windows Registry Editor Version 5.00\r\n\r\n";
+
+	if (!isatty()) hprintf(stdout, L"%lc", kBom);
+	hprintf(stdout, L"%ls", kHeader);
+}
+
+static __forceinline void
+writeRegItem(const wchar_t* instId, DWORD cap) {
+	static bool hasCalled = false;
+	static const wchar_t kPat[] = L"[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\%ls]\r\n\"Capabilities\"=dword:%.8x\r\n\r\n";
+
+	if (!hasCalled) {
+		hasCalled = true;
+		writeRegHeader();
 	}
-
-	return h;
+	hprintf(stdout, kPat, instId, cap);
 }
 
-// Return fixed length string of 8 characters, not NUL-terminated.
-static const wchar_t*
-hexFromDword(DWORD n) {
-	static const wchar_t kTxt[16] = L"0123456789abcdef";
-	static const wchar_t kZero[8] = L"00000000";
-
-	static wchar_t buf[8];
-	CopyMemory(buf, kZero, sizeof(kZero));
-
-	for (int i = 7; n; n >>= 4) {
-		buf[i--] = kTxt[n & 0xF];
-	}
-	
-	return buf;
-}
-
-static bool
-writeCapabilities(HANDLE h, const wchar_t* instPath, DWORD instPathLen, DWORD cap, const wchar_t** errmsg) {
-	static const wchar_t* kErrWriting = L"Can\'t write file.\r\n";
-
-	static const wchar_t kP0[50] = L"[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\";
-	static const wchar_t kP1[24] = L"]\r\n\"Capabilities\"=dword:";
-	static const wchar_t kP2[4] = L"\r\n\r\n";
-
-	DWORD cb;
-	if (!WriteFile(h, kP0, sizeof(kP0), &cb, NULL)) goto err;
-	if (!WriteFile(h, instPath, sizeof(*instPath) * instPathLen, &cb, NULL)) goto err;
-	if (!WriteFile(h, kP1, sizeof(kP1), &cb, NULL)) goto err;
-	if (!WriteFile(h, hexFromDword(cap), sizeof(wchar_t) * 8, &cb, NULL)) goto err;
-	if (!WriteFile(h, kP2, sizeof(kP2), &cb, NULL)) goto err;
-	return true;
-
-err:;
-	if (errmsg) *errmsg = kErrWriting;
-	return false;
-}
-
-void
-entry(void)
+void entry(void)
 {
-	wchar_t* fpath = getOutputPath();
-	if (!fpath) {
-		help();
+	if (!isCmdOk()) {
+		hprintf(stderr, L"%ls", kHelp_);
 		ExitProcess(1);
 	}
 
-	HDEVINFO infoSet = SetupDiGetClassDevs(NULL, NULL, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+	HDEVINFO infoSet = SetupDiGetClassDevsW(NULL, NULL, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
 	if (infoSet == INVALID_HANDLE_VALUE) ExitProcess(2);
 
-	int rlt = 0;
-	const wchar_t* errmsg;
+	int rlt = 1;
 
-	HANDLE h = createRegFile(fpath, &errmsg);
-	if (h == INVALID_HANDLE_VALUE) {
-		errout(errmsg, -1);
-		rlt = 3;
-		goto fin;
-	}
-
-	SP_DEVINFO_DATA infoData = { sizeof(infoData) };
-	for (DWORD idx = 0;; ++idx) {
-		if (!SetupDiEnumDeviceInfo(infoSet, idx, &infoData)) break;
+	size_t total = 0;
+	size_t count = 0;
+	SP_DEVINFO_DATA info = { sizeof(info) };
+	for (DWORD idx = 0; SetupDiEnumDeviceInfo(infoSet, idx, &info); ++idx) {
 		DWORD cap;
-		if (!SetupDiGetDeviceRegistryProperty(infoSet, &infoData, SPDRP_CAPABILITIES, NULL, (PBYTE)&cap, sizeof(cap), NULL)) continue;
-		if (!(cap & CM_DEVCAP_REMOVABLE)) continue;
-		if (cap & CM_DEVCAP_SURPRISEREMOVALOK) continue;
+		CONFIGRET cret;
 
-		wchar_t instPath[MAX_DEVICE_ID_LEN];
-		DWORD cch;
-		if (!SetupDiGetDeviceInstanceId(infoSet, &infoData, instPath, ARRAYSIZE(instPath), &cch)) {
-			continue;
+		if (!SetupDiGetDeviceRegistryPropertyW(infoSet, &info, SPDRP_CAPABILITIES, NULL, (PBYTE)&cap, sizeof(cap), NULL)) continue;
+		if (!(cap & CM_DEVCAP_REMOVABLE)) continue;
+		if (cap & CM_DEVCAP_SURPRISEREMOVALOK) {
+			ULONG status = 0;
+			ULONG problemCode = 0;
+			cret = CM_Get_DevNode_Status(&status, &problemCode, info.DevInst, 0);
+			if (cret != CR_SUCCESS) continue;
+			if (problemCode != (CM_PROB_REENUMERATION | CM_PROB_DISABLED_SERVICE)) continue;
 		}
+		++total;
+
+		wchar_t instId[MAX_DEVICE_ID_LEN];
+		cret = CM_Get_Device_IDW(info.DevInst, instId, ARRAYSIZE(instId), 0);
+		if (cret != CR_SUCCESS) {
+			hprintf(stderr, L"Can't get device instance id: 0x%X.\r\n", cret);
+			break;
+		};
 
 		cap &= ~CM_DEVCAP_REMOVABLE;
-		if (!writeCapabilities(h, instPath, cch - 1, cap, &errmsg)) {
-			errout(errmsg, -1);
-			rlt = 4;
-			break;
-		}
+		writeRegItem(instId, cap);
+		++count;
 	};
 
-	CloseHandle(h);
+	if (total != count) goto fin;
 
+	if (isatty()) {
+		if (!total) hprintf(stderr, L"%ls", kEject_);
+		hprintf(stderr, L"%ls", kHelp_);
+	}
+	else if (total) {
+		hprintf(stderr, L"%ls", kSchd_);
+	}
+
+	rlt = 0;
 fin:
 	SetupDiDestroyDeviceInfoList(infoSet);
-	ExitProcess(rlt);
+	ExitProcess((UINT)rlt);
 }
