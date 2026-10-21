@@ -4,14 +4,6 @@ Hide items from the taskbar *Safely Remove Hardware And Eject Media* menu. For W
 
 This repo has been superseded by [NoEject](https://github.com/chrdev/noeject), which works on Windows Vista and later.
 
-From this
-
-![Original Eject Menu](https://github.com/chrdev/noeject/pic/original.png)
-
-To this
-
-![Hidden by GREMOV](https://github.com/chrdev/noeject/pic/noejected.png)
-
 ## Usage
 
 On command prompt:
