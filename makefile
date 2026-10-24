@@ -1,4 +1,4 @@
-# Build noeject.exe x64 or x86. VS2026 nmake.
+# Build gremov.exe x64 or x86. VS2026 nmake.
 # chrdev, 0BSD.
 
 
@@ -23,12 +23,12 @@ CC = cl
 
 CFLAGS = $(CFLAGS) /nologo \
 	/TC /W4 /WX /GS- \
-	/O1 /Oi /Gy /GF /Zc:inline \
+	/O1 /Oi /Gy /GF \
 	/DNDEBUG /D_CONSOLE /D_UNICODE /DUNICODE \
 
 LDFLAGS = $(LDFLAGS) /NOLOGO \
 	/WX \
-	/FIXED \
+	/DYNAMICBASE:NO \
 	/NODEFAULTLIB \
 	/ENTRY:entry \
 

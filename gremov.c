@@ -111,7 +111,7 @@ void entry(void)
 			ULONG problemCode = 0;
 			cret = CM_Get_DevNode_Status(&status, &problemCode, info.DevInst, 0);
 			if (cret != CR_SUCCESS) continue;
-			if (problemCode != (CM_PROB_REENUMERATION | CM_PROB_DISABLED_SERVICE)) continue;
+			if (problemCode != CM_PROB_HELD_FOR_EJECT) continue;
 		}
 		++total;
 
